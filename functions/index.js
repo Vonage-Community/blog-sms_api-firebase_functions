@@ -1,10 +1,15 @@
-require('dotenv').config();
+require("dotenv").config();
 
-const functions = require('firebase-functions');
-const admin = require('firebase-admin');
-const { Vonage } = require('@vonage/server-sdk');
+const functions = require("firebase-functions/v1");
+const admin = require("firebase-admin");
+const { Vonage } = require("@vonage/server-sdk");
 
-admin.initializeApp();
+const serviceAccount = require("./serviceAccountKey.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://name_of_the_database.region.firebasedatabase.app",
+});
 
 // If you are using .env
 const vonage = new Vonage({
@@ -34,19 +39,40 @@ exports.inboundSMS = functions.https.onRequest(async (req, res) => {
 // This function listens for updates to the Firebase Realtime Database
 // and sends a message back to the original sender
 exports.sendSMS = functions.database
-  .ref('/msgq/{pushId}')
+  .ref("/msgq/{pushId}")
   .onCreate(async (message) => {
     const { msisdn, text, to } = message.val();
-    // the incoming object - 'msisdn' is the your phone number, and 'to' is the Vonage number
-    return vonage.sms.send(to, msisdn, `You sent the following text: ${text}`, (err, res) => {
-      if (err) {
-        console.log(err);
+
+    const resultSnapshot = await message.ref.parent
+      .child("result")
+      .once("value");
+    if (resultSnapshot.exists()) {
+      console.log("Result exists already.");
+      return;
+    }
+
+    try {
+      const responseData = await vonage.sms.send({
+        to: to,
+        from: msisdn,
+        text: `You sent the following text: ${text}`,
+      });
+
+      if (responseData.messages && responseData.messages[0].status === "0") {
+        const result = `You sent the following text: ${responseData.messages[0]["message-id"]}`;
+        await message.ref.parent.child("result").set(result);
+        console.log(result);
+        return result;
       } else {
-        if (res.messages[0]['status'] === "0") {
-          console.log("Message sent successfully.");
-        } else {
-          console.log(`Message failed with error: ${res.messages[0]['error-text']}`);
-        }
+        const errorText =
+          (responseData.messages && responseData.messages[0]["error-text"]) ||
+          "Unknown error";
+        const errorMessage = `Message has failed with error: ${errorText}`;
+        console.error(errorMessage);
+        return errorMessage;
       }
-    })
+    } catch (err) {
+      console.error("Vonage error:", err);
+      return `Vonage error: ${err.message}`;
+    }
   });
